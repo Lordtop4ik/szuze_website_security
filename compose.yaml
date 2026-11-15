@@ -1,0 +1,23 @@
+services:
+  web:
+    build: .
+    ports:
+      - "127.0.0.1:${HOST_PORT:-8000}:8000"
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8000"
+      SHOP_DB: /app/data/shop.sqlite3
+      COOKIE_SECURE: "0"
+      SHOP_ADMIN_TOKEN: ${SHOP_ADMIN_TOKEN:-}
+    volumes:
+      - shop-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/products', timeout=2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  shop-data:
