@@ -33,6 +33,8 @@ let pending = false;
 let searchRequest;
 let requestId;
 let ready = false;
+let auth = { user: null, csrf: null };
+const historyKey = () => `czuze:orders:${auth.user?.id ?? "guest"}`;
 
 let storageSnapshot;
 
@@ -48,8 +50,9 @@ function save(overrides) {
       location.reload();
       return false;
     }
+    if (apiEnabled) localStorage.setItem(historyKey(), JSON.stringify(overrides?.orders ?? orders));
     const next = JSON.stringify({
-      cart: [...cartItems], favorites: [...favorites], promo, requestId, demoStock, orders, ...overrides,
+      cart: [...cartItems], favorites: [...favorites], promo, requestId, demoStock, ...overrides, orders: apiEnabled ? [] : (overrides?.orders ?? orders), owner: auth.user?.id,
     });
     localStorage.setItem(storageKey, next);
     storageSnapshot = next;
@@ -69,6 +72,17 @@ function restore() {
   const saved = readSavedShop(storageSnapshot, products);
   ({ demoStock, orders, favorites, promo, requestId } = saved);
   cartItems = saved.cart;
+  if (apiEnabled) {
+    try {
+      const own = readSavedShop(JSON.stringify({ orders: JSON.parse(localStorage.getItem(historyKey()) || '[]') }), products);
+      orders = own.orders;
+      if (JSON.parse(storageSnapshot || '{}').owner !== auth.user?.id) requestId = undefined;
+    } catch {
+      orders = [];
+      requestId = undefined;
+      storageWarning();
+    }
+  }
   if (promo) {
     promoInput.value = promoCode;
     $("#promo-status").textContent = "Скидка 10% активна.";
@@ -76,7 +90,7 @@ function restore() {
 }
 
 async function request(path, options) {
-  const response = await fetch(`./api/${path}`, options);
+  const response = await fetch(`./api/${path}`, { ...options, headers: { ...options?.headers, "X-CSRF-Token": auth.csrf ?? "" } });
   const result = await response.json();
   if (!response.ok) {
     const error = new Error(result.error || "Запрос не выполнен.");
@@ -374,6 +388,7 @@ $("#promo-form").addEventListener("submit", event => {
 
 checkout.addEventListener("click", async () => {
   if (pending || !cartItems.size) return;
+  if (apiEnabled && !auth.user) { location.assign('/login?next=checkout'); return; }
   pending = true;
   renderCart("Отправляем заказ");
   try {
@@ -408,6 +423,7 @@ checkout.addEventListener("click", async () => {
     }
     location.assign(`?view=orders&placed=${encodeURIComponent(order.id)}`);
   } catch (error) {
+    if (apiEnabled && error.status === 401) { location.assign('/login?next=checkout'); return; }
     if (apiEnabled && error.status === 409) {
       requestId = undefined;
       save();
@@ -451,6 +467,17 @@ async function start() {
     }]));
     for (const name of [...new Set(items.map(product => product.category))].sort((a, b) => a.localeCompare(b, "ru"))) {
       category.add(new Option(name, name));
+    }
+    if (apiEnabled) {
+      auth = await request('auth/me');
+      const account = document.querySelector('#account');
+      account.hidden = false;
+      if (auth.user) {
+        document.querySelector('#account-name').textContent = auth.user.username;
+        document.querySelector('#logout-csrf').value = auth.csrf;
+        document.querySelector('#logout-form').hidden = false;
+        document.querySelector('#login-link').hidden = true;
+      }
     }
     restore();
     if (!apiEnabled) {

@@ -1,12 +1,11 @@
 """Локальный JSON API и SQLite для магазина."""
 from contextlib import closing
 import hmac
-from http.server import SimpleHTTPRequestHandler
 import json
 import re
 from secrets import randbelow
 import sqlite3
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs
 
 PRODUCT_FIELDS = ('id', 'name', 'price', 'category', 'description', 'image', 'stock')
 PROMO = 'DEBUG10'
@@ -45,6 +44,12 @@ def prepare_database(database, catalog):
                 total_kopecks INTEGER NOT NULL
             );
         """)
+        if 'user_id' not in {row['name'] for row in conn.execute('PRAGMA table_info(orders)')}:
+            conn.execute('ALTER TABLE orders ADD COLUMN user_id INTEGER')
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER, csrf TEXT NOT NULL, expires REAL NOT NULL);
+        """)
         conn.executemany(
             'INSERT OR IGNORE INTO products VALUES (?, ?, ?, ?, ?, ?, ?)',
             ([product[field] for field in PRODUCT_FIELDS] for product in products),
@@ -55,57 +60,10 @@ def prepare_database(database, catalog):
         )
 
 
-class ShopHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, directory, database, admin_token):
-        self.database = database
-        self.admin_token = admin_token
-        super().__init__(*args, directory=directory)
-
-    def respond(self, status, payload, content_type='application/json; charset=utf-8'):
-        if isinstance(payload, dict) or isinstance(payload, list):
-            payload = json.dumps(payload, ensure_ascii=False).encode('utf-8')
-        self.send_response(status)
-        self.send_header('Content-Type', content_type)
-        self.send_header('Content-Length', str(len(payload)))
-        self.send_header('Cache-Control', 'no-store')
-        self.send_header('X-Content-Type-Options', 'nosniff')
-        self.end_headers()
-        self.wfile.write(payload)
-
-    def api(self, handle):
-        try:
-            status, result = handle()
-        except ApiError as error:
-            status, result = error.status, {'error': str(error)}
-        except sqlite3.Error:
-            self.log_error('SQLite request failed')
-            status, result = 503, {'error': 'База временно недоступна. Повторите запрос.'}
-        self.respond(status, result)
-
-    def read_json(self):
-        if self.headers.get_content_type() != 'application/json':
-            raise ApiError(415, 'Требуется Content-Type: application/json.')
-        try:
-            size = int(self.headers.get('Content-Length', '0'))
-            if not 0 < size <= 32768:
-                raise ApiError(413, 'Недопустимый размер запроса.')
-            data = json.loads(self.rfile.read(size))
-        except (ValueError, RecursionError):
-            raise ApiError(400, 'Некорректный JSON.') from None
-        if not isinstance(data, dict):
-            raise ApiError(400, 'Требуется объект JSON.')
-        return data
-
-    def do_GET(self):
-        url = urlsplit(self.path)
-        if url.path == '/shop-mode.js':
-            self.respond(200, b'const apiEnabled = true;\n', 'text/javascript; charset=utf-8')
-        elif url.path == '/api/products':
-            self.api(lambda: self.get_products(url.query))
-        elif url.path.startswith('/api/'):
-            self.respond(404, {'error': 'Маршрут не найден.'})
-        else:
-            super().do_GET()
+class ShopService:
+    def __init__(self, database, admin_token='', headers=None, body=None, user_id=None):
+        self.database, self.admin_token = database, admin_token
+        self.headers, self.body, self.user_id = headers or {}, body, user_id
 
     def get_products(self, query):
         params = parse_qs(query)
@@ -119,14 +77,8 @@ class ShopHandler(SimpleHTTPRequestHandler):
             ]
         return 200, products
 
-    def do_POST(self):
-        if urlsplit(self.path).path == '/api/orders':
-            self.api(self.create_order)
-        else:
-            self.respond(404, {'error': 'Маршрут не найден.'})
-
     def create_order(self):
-        body = self.read_json()
+        body = self.body
         items = body.get('items')
         if not isinstance(items, list) or not 1 <= len(items) <= 100:
             raise ApiError(400, 'Укажите от 1 до 100 строк заказа.')
@@ -159,7 +111,7 @@ class ShopHandler(SimpleHTTPRequestHandler):
                     'SELECT * FROM orders WHERE request_id = ?', (request_id,)
                 ).fetchone()
                 if previous:
-                    if previous['payload'] != payload:
+                    if previous['user_id'] != self.user_id or previous['payload'] != payload:
                         raise ApiError(409, 'Этот ID запроса уже использован.')
                     return 200, {'id': previous['id'], 'totalKopecks': previous['total_kopecks']}
             total = 0
@@ -177,17 +129,10 @@ class ShopHandler(SimpleHTTPRequestHandler):
             if promo:
                 total -= total // 10
             order_id = conn.execute(
-                'INSERT INTO orders (request_id, payload, total_kopecks) VALUES (?, ?, ?)',
-                (request_id, payload, total),
+                'INSERT INTO orders (request_id, payload, total_kopecks, user_id) VALUES (?, ?, ?, ?)',
+                (request_id, payload, total, self.user_id),
             ).lastrowid
         return 201, {'id': order_id, 'totalKopecks': total}
-
-    def do_PUT(self):
-        match = re.fullmatch(r'/api/products/([a-z0-9-]{1,40})', urlsplit(self.path).path)
-        if match:
-            self.api(lambda: self.put_product(match[1]))
-        else:
-            self.respond(404, {'error': 'Маршрут не найден.'})
 
     def put_product(self, product_id):
         if not self.admin_token:
@@ -196,7 +141,7 @@ class ShopHandler(SimpleHTTPRequestHandler):
         if not hmac.compare_digest(token, self.admin_token.encode('utf-8')):
             raise ApiError(403, 'Требуется токен администратора.')
         product = {'id': product_id}
-        data = self.read_json()
+        data = self.body
         for field, limit in (('name', 100), ('category', 60), ('description', 240)):
             value = data.get(field)
             if not isinstance(value, str) or not 1 <= len(value.strip()) <= limit:

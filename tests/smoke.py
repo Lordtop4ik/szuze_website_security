@@ -11,7 +11,7 @@ def call(args, cwd):
 
 with tempfile.TemporaryDirectory(prefix='shop-test-') as tmp:
     work=Path(tmp)/'project'
-    shutil.copytree(ROOT,work,ignore=shutil.ignore_patterns('.git','bin','obj','*.zip','__pycache__'))
+    shutil.copytree(ROOT,work,ignore=shutil.ignore_patterns('.git','.venv','.pytest_cache','.local','data','bin','obj','*.zip','__pycache__'))
     (work/'site/products.json').write_text('[]')
     (work/'site/old.txt').write_text('old')
     call(CMD+['--pack'],work)

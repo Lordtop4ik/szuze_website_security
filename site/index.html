@@ -23,6 +23,8 @@
         <a href="?view=cart" data-nav="cart">Корзина <span id="count">0</span></a>
         <a href="?view=orders" data-nav="orders">Заказы</a>
       </nav>
+      <div id="account" hidden><span id="account-name"></span><a id="login-link" href="/login">Войти / Регистрация</a>
+      <form id="logout-form" action="/logout" method="post" hidden><input id="logout-csrf" name="csrf" type="hidden"><button>Выйти</button></form></div>
     </header>
     <main>
       <header class="hero" id="hero" hidden>

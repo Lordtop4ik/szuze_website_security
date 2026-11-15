@@ -1,13 +1,10 @@
-"""Локальный сервер магазина. python3 main.py [--pack]. Только стандартная библиотека."""
+"""Локальный сервер магазина. python3 main.py [--pack]. FastAPI."""
 import argparse
-from functools import partial
-from http.server import ThreadingHTTPServer
 import os
 from pathlib import Path
 import tempfile
 import zipfile
 
-from shop_api import ShopHandler, prepare_database
 
 
 def raise_walk_error(error):
@@ -47,22 +44,10 @@ def main():
     if args.pack:
         pack(site)
         return
-    host = os.environ.get('HOST', '127.0.0.1')
-    port = int(os.environ.get('PORT', '8000'))
-    database = Path(os.environ.get('SHOP_DB') or 'data/shop.sqlite3').resolve()
-    if database.is_relative_to(site.resolve()):
-        parser.error('SHOP_DB должен находиться вне публичной папки site/')
-    prepare_database(database, site / 'catalog.js')
-    handler = partial(
-        ShopHandler, directory=str(site.resolve()), database=database,
-        admin_token=os.environ.get('SHOP_ADMIN_TOKEN', ''),
-    )
-    with ThreadingHTTPServer((host, port), handler) as server:
-        print(f'Open http://localhost:{port} - Ctrl+C to stop', flush=True)
-        try:
-            server.serve_forever()
-        except KeyboardInterrupt:
-            pass
+    import uvicorn
+    from webapp import create_app
+    uvicorn.run(create_app(), host=os.environ.get('HOST', '127.0.0.1'),
+                port=int(os.environ.get('PORT', '8000')), proxy_headers=False)
 
 
 if __name__ == '__main__':

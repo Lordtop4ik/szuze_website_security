@@ -1,50 +1,38 @@
 """HTTP integration tests with a fresh temporary SQLite database."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from functools import partial
-from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
-from threading import Thread
 import unittest
-from urllib.error import HTTPError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from shop_api import ShopHandler, prepare_database
-
+from fastapi.testclient import TestClient
+from webapp import create_app
 
 @contextmanager
 def serve(database):
-    site = ROOT / 'site'
-    prepare_database(database, site / 'catalog.js')
-    handler = partial(ShopHandler, directory=str(site), database=database, admin_token='test-only')
-    with ThreadingHTTPServer(('127.0.0.1', 0), handler) as server:
-        thread = Thread(target=server.serve_forever)
-        thread.start()
-        try:
-            yield f'http://127.0.0.1:{server.server_port}'
-        finally:
-            server.shutdown()
-            thread.join()
-
+    import os
+    from unittest.mock import patch
+    with patch.dict(os.environ, SHOP_ADMIN_TOKEN='test-only'):
+        with TestClient(create_app(database)) as client:
+            csrf = client.get('/api/auth/me').json()['csrf']
+            response = client.post('/register', data={'username':'tester', 'password':'test-password', 'csrf':csrf}, follow_redirects=False)
+            if response.status_code == 409:
+                response = client.post('/login', data={'username':'tester', 'password':'test-password', 'csrf':csrf}, follow_redirects=False)
+            assert response.status_code == 303
+            client.headers['X-CSRF-Token'] = client.get('/api/auth/me').json()['csrf']
+            yield client
 
 def request(base, path, *, method='GET', body=None, token=''):
-    headers = {'X-Admin-Token': token}
+    headers = {'X-Admin-Token':token}
     if body is not None:
         headers['Content-Type'] = 'application/json'
-    req = Request(base + path, data=None if body is None else json.dumps(body).encode(),
-                  method=method, headers=headers)
-    try:
-        with urlopen(req, timeout=12) as response:
-            return response.status, json.load(response)
-    except HTTPError as error:
-        with error:
-            return error.code, json.load(error)
+    response = base.request(method, path, content=None if body is None else json.dumps(body).encode(), headers=headers)
+    return response.status_code, response.json()
 
 
 def order(product_id, quantity=1):

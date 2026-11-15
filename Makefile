@@ -6,8 +6,7 @@ pack:
 	$(PYTHON) main.py --pack
 test:
 	node tests/shop.test.cjs
-	$(PYTHON) tests/test_api.py
-	$(PYTHON) tests/test_pack.py
+	$(PYTHON) -m pytest -q
 	$(PYTHON) tests/smoke.py
 docker-build:
 	docker build -t shop-python .

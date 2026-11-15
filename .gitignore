@@ -10,3 +10,7 @@ __pycache__/
 .vscode/
 !.env.example
 /data/
+.local/
+.pytest_cache/
+*.sqlite3*
+*.log

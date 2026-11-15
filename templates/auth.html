@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{{ 'Регистрация' if register else 'Вход' }} — CZUZE</title><link rel="stylesheet" href="/styles.css"></head>
+<body><main class="shell auth-page"><a href="/" class="brand">&gt;_ CZUZE / shop</a><h1>{{ 'Регистрация' if register else 'Вход' }}</h1>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+<form method="post" class="auth-form"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="next" value="{{ next }}">
+<p><label>Логин <input name="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_]{3,32}" autocomplete="username" aria-describedby="username-help"></label></p><p id="username-help">3–32 латинских буквы, цифры или _.</p>
+<p><label>Пароль <input name="password" type="password" required minlength="8" maxlength="128" autocomplete="{{ 'new-password' if register else 'current-password' }}"></label></p>
+<button class="add" type="submit">{{ 'Зарегистрироваться' if register else 'Войти' }}</button></form>
+<p><a href="{{ '/login' if register else '/register' }}?next={{ next }}">{{ 'Уже есть аккаунт? Войти' if register else 'Создать аккаунт' }}</a></p></main></body></html>
