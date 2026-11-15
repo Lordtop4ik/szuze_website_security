@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101111">
   <title>Czuze — Лавка отладчика</title>
-  <link rel="stylesheet" href="./styles.css?v=20261111-all-models-v2">
+  <link rel="stylesheet" href="./styles.css?v=20261115-auth-v2">
   <script src="./catalog.js?v=20261111-all-models-v2" defer></script>
   <script src="./shop-mode.js?v=20261111-all-models-v2" defer></script>
   <script src="./shop-rules.js?v=20261111-all-models-v2" defer></script>
@@ -23,8 +23,8 @@
         <a href="?view=cart" data-nav="cart">Корзина <span id="count">0</span></a>
         <a href="?view=orders" data-nav="orders">Заказы</a>
       </nav>
-      <div id="account" hidden><span id="account-name"></span><a id="login-link" href="/login">Войти / Регистрация</a>
-      <form id="logout-form" action="/logout" method="post" hidden><input id="logout-csrf" name="csrf" type="hidden"><button>Выйти</button></form></div>
+      <div id="account" hidden><span id="account-name"></span><a class="secondary" id="login-link" href="/login">Войти / Регистрация</a>
+      <form id="logout-form" action="/logout" method="post" hidden><input id="logout-csrf" name="csrf" type="hidden"><button class="secondary" type="submit">Выйти</button></form></div>
     </header>
     <main>
       <header class="hero" id="hero" hidden>
