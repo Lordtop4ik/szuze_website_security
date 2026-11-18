@@ -31,10 +31,12 @@ def test_live_server_does_not_expose_private_files(live_client, path):
 
 def test_live_server_serves_updated_file(live_client, live_project):
     path = live_project / 'site/version.txt'
-    try:
-        path.write_bytes(b'version1')
-        assert live_client.get('/version.txt').content == b'version1'
-        path.write_bytes(b'version2')
-        assert live_client.get('/version.txt').content == b'version2'
-    finally:
-        path.unlink(missing_ok=True)
+    path.write_bytes(b'old')
+
+    # HEAD confirms the original file is visible without streaming it during the rewrite.
+    before = live_client.head('/version.txt')
+    assert before.status_code == 200
+    assert before.headers['Content-Length'] == '3'
+
+    path.write_bytes(b'version2')
+    assert live_client.get('/version.txt').content == b'version2'

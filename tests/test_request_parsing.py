@@ -5,8 +5,14 @@ import pytest
     (b'{}', 'text/plain', 415, 'Требуется Content-Type: application/json.'),
     (b'{', 'application/json', 400, 'Некорректный JSON.'),
     (b'[]', 'application/json', 400, 'Требуется объект JSON.'),
-    (b'x' * 32769, 'application/json', 413, 'Недопустимый размер запроса.'),
-    (b'x' * 32769, 'text/plain', 413, 'Недопустимый размер запроса.'),
+    pytest.param(
+        b'x' * 32769, 'application/json', 413, 'Недопустимый размер запроса.',
+        id='oversized-json',
+    ),
+    pytest.param(
+        b'x' * 32769, 'text/plain', 413, 'Недопустимый размер запроса.',
+        id='oversized-text',
+    ),
 ])
 def test_order_reports_body_errors(shop_client, content, content_type, status, error):
     response = shop_client.post('/api/orders', content=content, headers={'Content-Type': content_type})
