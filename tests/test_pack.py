@@ -1,30 +1,32 @@
 """Filesystem error must preserve the previous archive."""
+
 import os
 from pathlib import Path
-import sys
-import tempfile
-import unittest
-from unittest.mock import patch
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import pytest
+
 from main import pack
 
-class PackTests(unittest.TestCase):
-    def test_unreadable_directory_preserves_previous_zip(self):
-        previous = Path.cwd()
-        with tempfile.TemporaryDirectory() as tmp:
-            os.chdir(tmp)
-            try:
-                Path('site/blocked').mkdir(parents=True)
-                Path('site/index.html').write_text('hello')
-                Path('shop.zip').write_bytes(b'previous archive')
-                original = os.scandir
-                def scandir(path):
-                    if Path(path).name == 'blocked': raise PermissionError('access denied')
-                    return original(path)
-                with patch('os.scandir', side_effect=scandir):
-                    with self.assertRaises(PermissionError): pack(Path('site'))
-                self.assertEqual(Path('shop.zip').read_bytes(), b'previous archive')
-            finally:
-                os.chdir(previous)
 
-if __name__=='__main__': unittest.main()
+@pytest.fixture
+def unreadable_site(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    site = Path('site')
+    (site / 'blocked').mkdir(parents=True)
+    (site / 'index.html').write_text('hello', encoding='utf-8')
+    Path('shop.zip').write_bytes(b'previous archive')
+    scandir = os.scandir
+
+    def fail_on_blocked(path):
+        if Path(path).name == 'blocked':
+            raise PermissionError('access denied')
+        return scandir(path)
+
+    monkeypatch.setattr(os, 'scandir', fail_on_blocked)
+    return site
+
+
+def test_unreadable_directory_preserves_previous_zip(unreadable_site):
+    with pytest.raises(PermissionError, match='access denied'):
+        pack(unreadable_site)
+    assert Path('shop.zip').read_bytes() == b'previous archive'

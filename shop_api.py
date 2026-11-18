@@ -60,6 +60,72 @@ def prepare_database(database, catalog):
         )
 
 
+def validate_order(body):
+    items = body.get('items')
+    if not isinstance(items, list) or not 1 <= len(items) <= 100:
+        raise ApiError(400, 'Укажите от 1 до 100 строк заказа.')
+    quantities = {}
+    for item in items:
+        if not isinstance(item, dict):
+            raise ApiError(400, 'Некорректная строка заказа.')
+        product_id, quantity = item.get('productId'), item.get('quantity')
+        if not isinstance(product_id, str) or not re.fullmatch(r'[a-z0-9-]{1,40}', product_id):
+            raise ApiError(400, 'Некорректный ID товара.')
+        if type(quantity) is not int or not 1 <= quantity <= 999:
+            raise ApiError(400, 'Количество должно быть целым числом от 1 до 999.')
+        quantities[product_id] = quantities.get(product_id, 0) + quantity
+        if quantities[product_id] > 999:
+            raise ApiError(400, 'Суммарное количество товара превышает 999.')
+    promo = body.get('promo', '')
+    if promo not in ('', PROMO):
+        raise ApiError(400, 'Неизвестный промокод.')
+    request_id = body.get('requestId')
+    if request_id is not None and (
+        not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9-]{1,80}', request_id)
+    ):
+        raise ApiError(400, 'Некорректный ID запроса.')
+    return quantities, promo, request_id
+
+
+def deduct_stock(conn, quantities):
+    total = 0
+    for product_id, quantity in quantities.items():
+        product = conn.execute('SELECT * FROM products WHERE id = ?', (product_id,)).fetchone()
+        if product is None:
+            raise ApiError(400, f'Товар {product_id} не найден.')
+        updated = conn.execute(
+            'UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?',
+            (quantity, product_id, quantity),
+        )
+        if not updated.rowcount:
+            raise ApiError(409, f'Недостаточно товара «{product["name"]}». Доступно: {product["stock"]}.')
+        total += product['price'] * 100 * quantity
+    return total
+
+
+def validate_product(product_id, data):
+    product = {'id': product_id}
+    for field, limit in (('name', 100), ('category', 60), ('description', 240)):
+        value = data.get(field)
+        if not isinstance(value, str) or not 1 <= len(value.strip()) <= limit:
+            raise ApiError(400, f'Некорректное поле {field}.')
+        try:
+            value.encode('utf-8')
+        except UnicodeEncodeError:
+            raise ApiError(400, f'Некорректное поле {field}.') from None
+        product[field] = value.strip()
+    for field, minimum, maximum in (('price', 1, 1_000_000), ('stock', 0, 999_999)):
+        value = data.get(field)
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ApiError(400, f'Некорректное поле {field}.')
+        product[field] = value
+    image = data.get('image')
+    if not isinstance(image, str) or not re.fullmatch(r'[a-z0-9-]{1,60}\.(svg|png|webp|jpe?g)', image):
+        raise ApiError(400, 'Укажите имя файла изображения из assets.')
+    product['image'] = image
+    return product
+
+
 class ShopService:
     def __init__(self, database, admin_token='', headers=None, body=None, user_id=None):
         self.database, self.admin_token = database, admin_token
@@ -78,30 +144,7 @@ class ShopService:
         return 200, products
 
     def create_order(self):
-        body = self.body
-        items = body.get('items')
-        if not isinstance(items, list) or not 1 <= len(items) <= 100:
-            raise ApiError(400, 'Укажите от 1 до 100 строк заказа.')
-        quantities = {}
-        for item in items:
-            if not isinstance(item, dict):
-                raise ApiError(400, 'Некорректная строка заказа.')
-            product_id, quantity = item.get('productId'), item.get('quantity')
-            if not isinstance(product_id, str) or not re.fullmatch(r'[a-z0-9-]{1,40}', product_id):
-                raise ApiError(400, 'Некорректный ID товара.')
-            if type(quantity) is not int or not 1 <= quantity <= 999:
-                raise ApiError(400, 'Количество должно быть целым числом от 1 до 999.')
-            quantities[product_id] = quantities.get(product_id, 0) + quantity
-            if quantities[product_id] > 999:
-                raise ApiError(400, 'Суммарное количество товара превышает 999.')
-        promo = body.get('promo', '')
-        if promo not in ('', PROMO):
-            raise ApiError(400, 'Неизвестный промокод.')
-        request_id = body.get('requestId')
-        if request_id is not None and (
-            not isinstance(request_id, str) or not re.fullmatch(r'[a-zA-Z0-9-]{1,80}', request_id)
-        ):
-            raise ApiError(400, 'Некорректный ID запроса.')
+        quantities, promo, request_id = validate_order(self.body)
         payload = json.dumps([quantities, promo], sort_keys=True)
         with closing(connect(self.database)) as conn, conn:
             # The write lock covers stock checks, decrement and order creation.
@@ -114,18 +157,7 @@ class ShopService:
                     if previous['user_id'] != self.user_id or previous['payload'] != payload:
                         raise ApiError(409, 'Этот ID запроса уже использован.')
                     return 200, {'id': previous['id'], 'totalKopecks': previous['total_kopecks']}
-            total = 0
-            for product_id, quantity in quantities.items():
-                product = conn.execute('SELECT * FROM products WHERE id = ?', (product_id,)).fetchone()
-                if product is None:
-                    raise ApiError(400, f'Товар {product_id} не найден.')
-                updated = conn.execute(
-                    'UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?',
-                    (quantity, product_id, quantity),
-                )
-                if not updated.rowcount:
-                    raise ApiError(409, f'Недостаточно товара «{product["name"]}». Доступно: {product["stock"]}.')
-                total += product['price'] * 100 * quantity
+            total = deduct_stock(conn, quantities)
             if promo:
                 total -= total // 10
             order_id = conn.execute(
@@ -140,26 +172,7 @@ class ShopService:
         token = self.headers.get('X-Admin-Token', '').encode('utf-8')
         if not hmac.compare_digest(token, self.admin_token.encode('utf-8')):
             raise ApiError(403, 'Требуется токен администратора.')
-        product = {'id': product_id}
-        data = self.body
-        for field, limit in (('name', 100), ('category', 60), ('description', 240)):
-            value = data.get(field)
-            if not isinstance(value, str) or not 1 <= len(value.strip()) <= limit:
-                raise ApiError(400, f'Некорректное поле {field}.')
-            try:
-                value.encode('utf-8')
-            except UnicodeEncodeError:
-                raise ApiError(400, f'Некорректное поле {field}.') from None
-            product[field] = value.strip()
-        for field, minimum, maximum in (('price', 1, 1_000_000), ('stock', 0, 999_999)):
-            value = data.get(field)
-            if type(value) is not int or not minimum <= value <= maximum:
-                raise ApiError(400, f'Некорректное поле {field}.')
-            product[field] = value
-        image = data.get('image')
-        if not isinstance(image, str) or not re.fullmatch(r'[a-z0-9-]{1,60}\.(svg|png|webp|jpe?g)', image):
-            raise ApiError(400, 'Укажите имя файла изображения из assets.')
-        product['image'] = image
+        product = validate_product(product_id, self.body)
         with closing(connect(self.database)) as conn, conn:
             conn.execute("""
                 INSERT INTO products VALUES (?, ?, ?, ?, ?, ?, ?)

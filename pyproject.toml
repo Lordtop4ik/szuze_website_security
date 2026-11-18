@@ -1,0 +1,20 @@
+[project]
+name = "szuze-website-security"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.121.3",
+    "jinja2==3.1.6",
+    "pwdlib[argon2]==0.3.0",
+    "uvicorn==0.38.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx==0.28.1",
+    "pytest==9.0.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

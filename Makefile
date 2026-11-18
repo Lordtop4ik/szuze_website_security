@@ -1,13 +1,12 @@
-PYTHON ?= python3
+UV ?= uv
 .PHONY: run pack test docker-build docker-run
 run:
-	$(PYTHON) main.py
+	$(UV) run --locked python main.py
 pack:
-	$(PYTHON) main.py --pack
+	$(UV) run --locked python main.py --pack
 test:
 	node tests/shop.test.cjs
-	$(PYTHON) -m pytest -q
-	$(PYTHON) tests/smoke.py
+	$(UV) run --locked pytest -q
 docker-build:
 	docker build -t shop-python .
 docker-run:

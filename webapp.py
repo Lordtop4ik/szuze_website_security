@@ -8,22 +8,60 @@ import re
 import secrets
 import sqlite3
 import time
+from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pwdlib import PasswordHash
 
+import api_docs as docs
+from auth_service import authenticate_user
 from shop_api import ApiError, ShopService, connect, prepare_database
 
 ROOT = Path(__file__).resolve().parent
-passwords = PasswordHash.recommended()
-DUMMY = passwords.hash('dummy-password')
+MAX_BODY_BYTES = 32768
 
 
 def client_ip(request):
     return request.client.host if request.client else ''
+
+
+async def read_body(request):
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(body) + len(chunk) > MAX_BODY_BYTES:
+            raise ApiError(413, 'Недопустимый размер запроса.')
+        body.extend(chunk)
+    return body
+
+
+def content_type(request):
+    return request.headers.get('content-type', '').split(';')[0]
+
+
+async def read_form(request):
+    body = await read_body(request)
+    if content_type(request) != 'application/x-www-form-urlencoded':
+        raise ApiError(415, 'Требуется HTML-форма.')
+    try:
+        fields = parse_qs(body.decode('utf-8'), keep_blank_values=True)
+    except UnicodeError:
+        raise ApiError(400, 'Некорректная форма.') from None
+    return {key: values[-1] for key, values in fields.items()}
+
+
+async def read_json(request):
+    body = await read_body(request)
+    if content_type(request) != 'application/json':
+        raise ApiError(415, 'Требуется Content-Type: application/json.')
+    try:
+        data = json.loads(body)
+    except (ValueError, RecursionError):
+        raise ApiError(400, 'Некорректный JSON.') from None
+    if not isinstance(data, dict):
+        raise ApiError(400, 'Требуется объект JSON.')
+    return data
 
 
 def create_app(database=None, cookie_secure=None):
@@ -37,7 +75,12 @@ def create_app(database=None, cookie_secure=None):
         prepare_database(database, ROOT / 'site/catalog.js')
         yield
 
-    app = FastAPI(lifespan=lifespan)
+    app = FastAPI(
+        title='Магазин — API',
+        description='Каталог, сессии и заказы магазина.',
+        swagger_ui_parameters={'withCredentials': True},
+        lifespan=lifespan,
+    )
     templates = Jinja2Templates(directory=ROOT / 'templates')
 
     @app.middleware('http')
@@ -78,34 +121,15 @@ def create_app(database=None, cookie_secure=None):
         if not current or not secrets.compare_digest(current['csrf'], value or ''):
             raise ApiError(403, 'Обновите страницу и повторите отправку формы.')
 
-    async def read_body(request, form=False):
-        body = bytearray()
-        async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > 32768:
-                raise ApiError(413, 'Недопустимый размер запроса.')
-        if form:
-            if request.headers.get('content-type', '').split(';')[0] != 'application/x-www-form-urlencoded':
-                raise ApiError(415, 'Требуется HTML-форма.')
-            from urllib.parse import parse_qs
-            try:
-                return {k: v[-1] for k, v in parse_qs(body.decode('utf-8'), keep_blank_values=True).items()}
-            except UnicodeError:
-                raise ApiError(400, 'Некорректная форма.') from None
-        if request.headers.get('content-type', '').split(';')[0] != 'application/json':
-            raise ApiError(415, 'Требуется Content-Type: application/json.')
-        try:
-            data = json.loads(body)
-        except (ValueError, RecursionError):
-            raise ApiError(400, 'Некорректный JSON.') from None
-        if not isinstance(data, dict):
-            raise ApiError(400, 'Требуется объект JSON.')
-        return data
-
     def destination(value):
         return '/?view=checkout' if value == 'checkout' else '/'
 
-    @app.get('/api/auth/me')
+    @app.get(
+        '/api/auth/me', tags=['Сессия'], summary='Получить сессию и CSRF-токен',
+        description='Создаёт гостевую сессию, если действующей сессии ещё нет.',
+        responses={200: docs.response('Текущая сессия', docs.SESSION), 503: docs.DATABASE_ERROR},
+        openapi_extra={'security': [{}, {'SessionCookie': []}]},
+    )
     def me(request: Request):
         current = session(request)
         response = JSONResponse({'user': {'id': current['user_id'], 'username': current['username']} if current and current['user_id'] else None,
@@ -117,8 +141,8 @@ def create_app(database=None, cookie_secure=None):
         response.headers['Cache-Control'] = 'no-store'
         return response
 
-    @app.get('/login')
-    @app.get('/register')
+    @app.get('/login', include_in_schema=False)
+    @app.get('/register', include_in_schema=False)
     def form_page(request: Request):
         current = session(request)
         response = templates.TemplateResponse(request=request, name='auth.html', context={
@@ -135,41 +159,36 @@ def create_app(database=None, cookie_secure=None):
         response.headers['Cache-Control'] = 'no-store'
         return response
 
-    @app.post('/login')
-    @app.post('/register')
+    @app.post('/login', include_in_schema=False)
+    @app.post('/register', include_in_schema=False)
     async def authenticate(request: Request):
-        data = await read_body(request, form=True)
+        data = await read_form(request)
         current = session(request)
         check_csrf(current, data.get('csrf'))
-        username, password = data.get('username', '').strip().lower(), data.get('password', '')
         register = request.url.path == '/register'
-        error, status, uid = '', 422, None
-        if not re.fullmatch(r'[a-z0-9_]{3,32}', username) or not 8 <= len(password) <= 128:
-            error = 'Логин: 3–32 латинских буквы, цифры или _. Пароль: 8–128 символов.'
-        else:
-            with closing(connect(database)) as conn, conn:
-                if register:
-                    try:
-                        uid = conn.execute('INSERT INTO users(username,password_hash) VALUES (?,?)', (username, passwords.hash(password))).lastrowid
-                    except sqlite3.IntegrityError:
-                        error, status = 'Этот логин уже занят.', 409
-                else:
-                    user = conn.execute('SELECT * FROM users WHERE username=?', (username,)).fetchone()
-                    valid = passwords.verify(password, user['password_hash'] if user else DUMMY)
-                    if user and valid:
-                        uid = user['id']
-                    else:
-                        error, status = 'Неверный логин или пароль.', 401
-        if error:
-            return templates.TemplateResponse(request=request, name='auth.html', context={
-                'register': register, 'csrf': current['csrf'], 'next': data.get('next', ''), 'error': error}, status_code=status)
+        try:
+            user_id = authenticate_user(
+                database, data.get('username', ''), data.get('password', ''), register=register
+            )
+        except ApiError as error:
+            return templates.TemplateResponse(
+                request=request,
+                name='auth.html',
+                context={
+                    'register': register,
+                    'csrf': current['csrf'],
+                    'next': data.get('next', ''),
+                    'error': str(error),
+                },
+                status_code=error.status,
+            )
         response = RedirectResponse(destination(data.get('next')), status_code=303)
-        new_session(response, uid, current)
+        new_session(response, user_id, current)
         return response
 
-    @app.post('/logout')
+    @app.post('/logout', include_in_schema=False)
     async def logout(request: Request):
-        data = await read_body(request, form=True)
+        data = await read_form(request)
         current = session(request)
         check_csrf(current, data.get('csrf'))
         with closing(connect(database)) as conn, conn:
@@ -181,35 +200,74 @@ def create_app(database=None, cookie_secure=None):
     def service(request, body=None, user_id=None):
         return ShopService(database, os.getenv('SHOP_ADMIN_TOKEN', ''), request.headers, body, user_id)
 
-    @app.get('/api/products')
+    @app.get(
+        '/api/products', tags=['Каталог'], summary='Получить каталог',
+        responses={200: docs.response('Список товаров', docs.PRODUCTS), 503: docs.DATABASE_ERROR},
+        openapi_extra={'parameters': docs.PRODUCT_FILTERS},
+    )
     def products(request: Request):
         status, data = service(request).get_products(request.url.query)
         return JSONResponse(data, status_code=status)
 
-    @app.post('/api/orders')
+    @app.post(
+        '/api/orders', tags=['Заказы'], summary='Оформить заказ', status_code=201,
+        description=(
+            'Войдите через /login и получите CSRF-токен из /api/auth/me. '
+            'Повтор с тем же requestId, составом заказа и владельцем возвращает прежний заказ.'
+        ),
+        responses={
+            **docs.BODY_ERRORS,
+            200: docs.response('Результат ранее созданного заказа', docs.ORDER),
+            201: docs.response('Новый заказ', docs.ORDER),
+            401: docs.response('Требуется вход', docs.ERROR),
+            403: docs.response('Некорректный CSRF-токен', docs.ERROR),
+            409: docs.response('Недостаточно товара или requestId уже использован', docs.ERROR),
+        },
+        openapi_extra={
+            'requestBody': docs.body(docs.ORDER_BODY, {'items': [{'productId': 'duck', 'quantity': 1}]}),
+            'security': [{'SessionCookie': [], 'CsrfToken': []}],
+        },
+    )
     async def orders(request: Request):
         current = session(request)
         if not current or not current['user_id']:
             raise ApiError(401, 'Войдите для оформления заказа.')
         check_csrf(current, request.headers.get('X-CSRF-Token'))
-        body = await read_body(request)
+        body = await read_json(request)
         status, data = service(request, body, current['user_id']).create_order()
         return JSONResponse(data, status_code=status)
 
-    @app.put('/api/products/{product_id}')
+    @app.put(
+        '/api/products/{product_id}', tags=['Каталог'], summary='Обновить или добавить товар',
+        description=(
+            'Доступно при настроенном SHOP_ADMIN_TOKEN. '
+            'ID товара содержит от 1 до 40 строчных латинских букв, цифр или дефисов.'
+        ),
+        responses={
+            **docs.BODY_ERRORS,
+            200: docs.response('Сохранённый товар', docs.PRODUCT),
+            403: docs.response('Изменение отключено или токен администратора неверен', docs.ERROR),
+            404: docs.response('Некорректный ID товара', docs.ERROR),
+        },
+        openapi_extra={
+            'requestBody': docs.body(docs.PRODUCT_BODY, docs.PRODUCT_EXAMPLE),
+            'security': [{'AdminToken': []}],
+        },
+    )
     async def update_product(product_id: str, request: Request):
         if not re.fullmatch(r'[a-z0-9-]{1,40}', product_id):
             raise ApiError(404, 'Маршрут не найден.')
-        status, data = service(request, await read_body(request)).put_product(product_id)
+        status, data = service(request, await read_json(request)).put_product(product_id)
         return JSONResponse(data, status_code=status)
 
-    @app.get('/shop-mode.js')
+    @app.get('/shop-mode.js', include_in_schema=False)
     def mode():
         return Response('const apiEnabled = true;\n', media_type='text/javascript')
 
-    @app.api_route('/api/{path:path}', methods=['GET', 'POST', 'PUT'])
+    @app.api_route('/api/{path:path}', methods=['GET', 'POST', 'PUT'], include_in_schema=False)
     def missing(path: str):
         raise ApiError(404, 'Маршрут не найден.')
 
+    docs.configure_openapi(app)
     app.mount('/', StaticFiles(directory=ROOT / 'site', html=True), name='site')
     return app
