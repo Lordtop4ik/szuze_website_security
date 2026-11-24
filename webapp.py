@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from guard import SecurityConfig, SecurityMiddleware
 
 import api_docs as docs
 from auth_service import authenticate_user
@@ -21,6 +22,19 @@ from shop_api import ApiError, ShopService, connect, prepare_database
 
 ROOT = Path(__file__).resolve().parent
 MAX_BODY_BYTES = 32768
+
+ddos_config = SecurityConfig(
+    enable_redis=True,
+    redis_url="redis://localhost:6379/0",
+    redis_pool_size=30,            # Увеличенный пул для параллельных запросов
+    redis_fail_open=False,         # При падении Redis — 503, а не отключение защиты
+
+    rate_limit=50,                 # Глобальный лимит: 50 запросов...
+    rate_limit_window=60,          # ...в минуту с одного IP
+
+    auto_ban_threshold=5,          # Бан после 5 нарушений (лимит + угрозы)
+    auto_ban_duration=86400,       # Бан на 24 часа
+)
 
 
 def client_ip(request):
